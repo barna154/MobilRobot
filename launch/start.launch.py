@@ -1,18 +1,13 @@
 from launch import LaunchDescription
-from launch.actions import LogInfo, IncludeLaunchDescription
-from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
-from launch_ros.substitutions import FindPackageShare
-from ament_index_python.packages import get_package_prefix
 
 
 def generate_launch_description():
-
-    megoldas2 = Node(
-        package='way_finder',
+    megoldas = Node(
+        package='mobil_robot',
         executable='megoldas',
         name='megoldas',
         output='screen'
     )
 
-    actions = [megoldas]
+    return LaunchDescription([megoldas])
