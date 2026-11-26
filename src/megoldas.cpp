@@ -11,7 +11,7 @@
 #include "sensor_msgs/msg/laser_scan.hpp"
 
 constexpr double kPi = 3.14159265358979323846;
-constexpr double kFov = kPi / 2.0;        // +/- 90 fok
+constexpr double kFov = 1.9;              // ~+/- 109 fok (hogy a kanyar nyilasat lassuk)
 constexpr double kMaxRange = 3.0;         // ennel messzebbit levagunk [m]
 constexpr double kBubbleFov = 1.05;       // buborekhoz csak az elso +/-60 fokot nezzuk [rad]
 constexpr double kMaxBubbleAngle = 0.6;   // buborek felszoge max ~35 fok [rad]
@@ -62,7 +62,7 @@ private:
       return;
     }
 
-    // 1. Sugarak (szog, tavolsag), csak az elso +/-90 fok, szog szerint rendezve
+    // 1. Sugarak (szog, tavolsag), csak az elso +/-kFov, szog szerint rendezve
     std::vector<std::pair<double, double>> pts;
     for (size_t i = 0; i < msg->ranges.size(); ++i) {
       const double a =
@@ -121,37 +121,48 @@ private:
       }
     }
 
-    // 4. Legjobb rés: az a szabad szakasz, ahol a tavolsagok osszege a legnagyobb
-    //    (szelesseg es melyseg is szamit)
+    // 4. Rés keresés: a LEGMELYEBB rés nyer (nem a legszélesebb).
+    //    Igy a kanyar nyilasa (r ~ 3 m) mar messzirol nyer a fal (r ~ 1.5 m) ellen.
     const double free_th = param("free_threshold");
-    double best_sum = 0.0;
-    size_t best_s = 0, best_e = 0;
+    const double min_width = 0.15;  // [rad] ennel keskenyebb rest nem veszunk figyelembe
+    double best_score = -1e9;
+    double angle = 0.0;
+    bool found = false;
     for (size_t k = 0; k < n;) {
       if (r[k] <= free_th) {
         ++k;
         continue;
       }
       const size_t s = k;
-      double sum = 0.0;
+      double max_r = 0.0;
       while (k < n && r[k] > free_th) {
-        sum += r[k];
+        max_r = std::max(max_r, r[k]);
         ++k;
       }
-      if (sum > best_sum) {
-        best_sum = sum;
-        best_s = s;
-        best_e = k - 1;
+      const size_t e = k - 1;
+      if (pts[e].first - pts[s].first < min_width) {
+        continue;
+      }
+      // a rés legmélyebb (max 90%-a feletti) sugarainak közepe
+      size_t lo2 = s, hi2 = e;
+      while (r[lo2] < 0.9 * max_r) {++lo2;}
+      while (r[hi2] < 0.9 * max_r) {--hi2;}
+      const double ang = 0.5 * (pts[lo2].first + pts[hi2].first);
+      // melyseg - kis büntetes a nagy szogert (egyenes folyosón az egyenes nyer)
+      const double score = max_r - 0.4 * std::abs(ang);
+      if (score > best_score) {
+        best_score = score;
+        angle = ang;
+        found = true;
       }
     }
-    if (best_sum == 0.0) {
+    if (!found) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "STOP: nincs szabad rés");
       drive(0.0, 0.0);
       return;
     }
 
-    // 5. Celszog = a rés kozepe (pozitiv = balra)
-    double angle = 0.5 * (pts[best_s].first + pts[best_e].first);
-
+    // 5. Celszog = a kivalasztott rés legmelyebb reszenek kozepe (pozitiv = balra)
     // szures: csokkenti az egyenes menti cikazast
     angle_f_ = 0.5 * angle_f_ + 0.5 * angle;
     angle = angle_f_;
@@ -165,14 +176,14 @@ private:
     const double w = std::clamp(
       param("steering_gain") * angle * (1.0 + 1.5 * std::abs(angle)), -1.5, 1.5);
     const double turn_factor = 1.0 - std::min(1.0, std::abs(angle) / kFov);
-    const double dist_factor = std::clamp(front / 1.0, 0.0, 1.0);  // 1 m-nel kezd lassulni
+    const double dist_factor = std::clamp(front / 1.5, 0.0, 1.0);  // 1.5 m-nel kezd lassulni
     const double v = param("min_speed") +
       (param("max_speed") - param("min_speed")) * std::min(turn_factor, dist_factor);
 
     RCLCPP_INFO_THROTTLE(
       get_logger(), *get_clock(), 500,
-      "angle=%.2f front=%.2f gap=%zu..%zu v=%.2f w=%.2f",
-      angle, front, best_s, best_e, v, w);
+      "angle=%.2f front=%.2f score=%.2f v=%.2f w=%.2f",
+      angle, front, best_score, v, w);
 
     drive(v, w);
   }
