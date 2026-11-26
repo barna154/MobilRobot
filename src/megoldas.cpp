@@ -29,6 +29,8 @@ public:
     declare_parameter("stop_distance", 0.2);   // ennel kozelebb elore megall/hatrál [m]
     declare_parameter("center_gain", 0.8);     // folyoson kozepre huzas erositese (0 = ki)
     declare_parameter("reverse_speed", -0.12); // hatrálas sebessege elakadaskor (0 = ki) [m/s]
+    declare_parameter("open_dist", 1.2);       // oldalt ennel messzebb nincs fal = nyilas [m]
+    declare_parameter("turn_front", 2.0);      // ha elore ennel kozelebb van fal + oldalt nyilas -> befordul [m]
 
     cmd_pub_ = create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 1);
     scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
@@ -198,6 +200,7 @@ private:
     double best_score = -1e9;
     double angle = 0.0;
     bool found = false;
+    bool turning = false;
     for (size_t k = 0; k < n;) {
       if (rf[k] <= free_th) {
         ++k;
@@ -228,7 +231,46 @@ private:
         found = true;
       }
     }
-    if (!found) {
+    // 4b. Oldalso nyilas: ha az egyik oldalon (kb. 46-92 fok) nincs fal, elol pedig
+    //     kozeledik egy, akkor arra fordul be. ~0.8 s-ig tartja az iranyt, hogy ne ugraljon.
+    {
+      const double open_dist = param("open_dist");
+      size_t cnt_l = 0, tot_l = 0, cnt_r = 0, tot_r = 0;
+      double sum_l = 0.0, sum_r = 0.0;
+      for (const auto & p : pts) {
+        const double aa = std::abs(p.first);
+        if (aa < 0.8 || aa > 1.6) {
+          continue;
+        }
+        if (p.first > 0.0) {
+          ++tot_l;
+          sum_l += p.second;
+          cnt_l += (p.second >= open_dist) ? 1 : 0;
+        } else {
+          ++tot_r;
+          sum_r += p.second;
+          cnt_r += (p.second >= open_dist) ? 1 : 0;
+        }
+      }
+      const bool open_l = tot_l > 0 && cnt_l >= 0.8 * tot_l;
+      const bool open_r = tot_r > 0 && cnt_r >= 0.8 * tot_r;
+      turning = now() < turn_until_;
+      if (!turning && front < param("turn_front") && (open_l || open_r)) {
+        if (open_l && open_r) {
+          turn_dir_ = (sum_l >= sum_r) ? 1.0 : -1.0;
+        } else {
+          turn_dir_ = open_l ? 1.0 : -1.0;
+        }
+        turn_until_ = now() + rclcpp::Duration::from_seconds(0.8);
+        turning = true;
+      }
+      if (turning) {
+        const double same = (angle * turn_dir_ > 0.0) ? std::abs(angle) : 0.0;
+        angle = turn_dir_ * std::max(1.0, same);
+      }
+    }
+
+    if (!found && !turning) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "STOP: nincs szabad rés");
       tryRecover(pts, rear, rear_n);
       return;
@@ -257,8 +299,8 @@ private:
 
     RCLCPP_INFO_THROTTLE(
       get_logger(), *get_clock(), 500,
-      "angle=%.2f front=%.2f score=%.2f latL=%.2f latR=%.2f v=%.2f w=%.2f",
-      angle, front, best_score, lat_l, lat_r, v, w);
+      "angle=%.2f front=%.2f score=%.2f latL=%.2f latR=%.2f turn=%.0f v=%.2f w=%.2f",
+      angle, front, best_score, lat_l, lat_r, turning ? turn_dir_ : 0.0, v, w);
 
     drive(v, w);
   }
@@ -269,6 +311,8 @@ private:
   bool recovering_ = false;
   double recover_dir_ = 1.0;
   rclcpp::Time recover_until_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time turn_until_{0, 0, RCL_ROS_TIME};
+  double turn_dir_ = 1.0;
 
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_pub_;
