@@ -27,9 +27,11 @@ public:
     declare_parameter("bubble_radius", 0.4);   // robot fele szelessege + raghagyas [m]
     declare_parameter("free_threshold", 0.6);  // ennel kozelebbi sugar nem szabad [m]
     declare_parameter("stop_distance", 0.2);   // ennel kozelebb elore megall/hatrál [m]
-    declare_parameter("center_gain", 1.8);     // folyoson kozepre huzas erositese (0 = ki)
+    declare_parameter("center_gain", 1.2);     // folyoson kozepre huzas erositese (0 = ki)
     declare_parameter("reverse_speed", -0.12); // hatrálas sebessege elakadaskor (0 = ki) [m/s]
     declare_parameter("open_dist", 1.2);       // oldalt ennel messzebb nincs fal = nyilas [m]
+    declare_parameter("reverse_time", 1.2);    // meddig hatral elakadas utan [s]
+    declare_parameter("reverse_blind", 0.0);   // 1.0 = akkor is hatral, ha a lidar nem lat hatrafele (VESZELYES)
     declare_parameter("turn_front", 2.0);      // ha elore ennel kozelebb van fal + oldalt nyilas -> befordul [m]
 
     cmd_pub_ = create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 1);
@@ -59,12 +61,26 @@ private:
     cmd_pub_->publish(cmd);
   }
 
-  // Elakadas: ha van hely hatul, hatral ~1.2 s-ig a nyitottabb oldal fele fordulva.
-  // Ha nem latunk hatrafele (rear_n == 0) vagy kicsi a hely, csak megall.
+  // Elakadas: hatral reverse_time ideig a nyitottabb oldal fele fordulva.
+  // Mindig kiirja a logba, mi tortent (hatral / miert nem hatral).
   void tryRecover(
     const std::vector<std::pair<double, double>> & pts, double rear, size_t rear_n)
   {
-    if (param("reverse_speed") >= 0.0 || rear_n == 0 || rear < 0.3) {
+    const bool blind = (rear_n == 0);
+    if (param("reverse_speed") >= 0.0) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "STOP: hatralas kikapcsolva (reverse_speed >= 0)");
+      drive(0.0, 0.0);
+      return;
+    }
+    if (blind && param("reverse_blind") < 0.5) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "STOP: a lidar nem lat hatrafele, nem tolat (reverse_blind:=1.0 engedelyezi a vak tolatast)");
+      drive(0.0, 0.0);
+      return;
+    }
+    if (!blind && rear < 0.3) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "STOP: nincs hely hatul (%.2f m)", rear);
       drive(0.0, 0.0);
       return;
     }
@@ -74,7 +90,10 @@ private:
     }
     recover_dir_ = (sum_l >= sum_r) ? 1.0 : -1.0;  // az orr a nyitottabb oldal fele forduljon
     recovering_ = true;
-    recover_until_ = now() + rclcpp::Duration::from_seconds(1.2);
+    recover_until_ = now() + rclcpp::Duration::from_seconds(param("reverse_time"));
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 1000, "HATRALAS (%s fele), hatso hely: %.2f m",
+      recover_dir_ > 0.0 ? "bal" : "jobb", rear);
     drive(param("reverse_speed"), recover_dir_);
   }
 
@@ -102,7 +121,8 @@ private:
 
     // Folyamatban levo hatralas
     if (recovering_) {
-      if (now() < recover_until_ && rear > 0.3 && rear_n > 0 && param("reverse_speed") < 0.0) {
+      const bool rear_ok = (rear_n == 0) ? (param("reverse_blind") > 0.5) : (rear > 0.3);
+      if (now() < recover_until_ && rear_ok && param("reverse_speed") < 0.0) {
         drive(param("reverse_speed"), recover_dir_);
         return;
       }
@@ -270,7 +290,14 @@ private:
       }
     }
 
-    if (!found && !turning) {
+    // 4c. Folyoso mod: ha mindket oldalon van fal (<0.95 m) es elol szabad az ut,
+    //     NEM a rés iranyaba kormanyoz, hanem a ket fal kozepere (lasd center_w lent).
+    const bool corridor = lat_l < 0.95 && lat_r < 0.95 && front > 1.0 && !turning;
+    if (corridor) {
+      angle = 0.0;
+    }
+
+    if (!found && !turning && !corridor) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "STOP: nincs szabad rés");
       tryRecover(pts, rear, rear_n);
       return;
@@ -299,8 +326,8 @@ private:
 
     RCLCPP_INFO_THROTTLE(
       get_logger(), *get_clock(), 500,
-      "angle=%.2f front=%.2f score=%.2f latL=%.2f latR=%.2f turn=%.0f v=%.2f w=%.2f",
-      angle, front, best_score, lat_l, lat_r, turning ? turn_dir_ : 0.0, v, w);
+      "angle=%.2f front=%.2f score=%.2f latL=%.2f latR=%.2f turn=%.0f cor=%d v=%.2f w=%.2f",
+      angle, front, best_score, lat_l, lat_r, turning ? turn_dir_ : 0.0, corridor ? 1 : 0, v, w);
 
     drive(v, w);
   }
