@@ -1,4 +1,4 @@
-// Egyszeru Follow the Gap
+// Egyszeru Follow the Gap (javitott)
 // /scan (lidar) -> /cmd_vel (sebesseg)
 
 #include <algorithm>
@@ -11,20 +11,22 @@
 #include "sensor_msgs/msg/laser_scan.hpp"
 
 constexpr double kPi = 3.14159265358979323846;
-constexpr double kFov = kPi / 2.0;   // +/- 90 fok
-constexpr double kMaxRange = 3.0;    // ennel messzebbit levagunk [m]
+constexpr double kFov = kPi / 2.0;        // +/- 90 fok
+constexpr double kMaxRange = 3.0;         // ennel messzebbit levagunk [m]
+constexpr double kBubbleFov = 1.05;       // buborekhoz csak az elso +/-60 fokot nezzuk [rad]
+constexpr double kMaxBubbleAngle = 0.6;   // buborek felszoge max ~35 fok [rad]
 
 class Megoldas : public rclcpp::Node
 {
 public:
   Megoldas() : Node("megoldas")
   {
-    declare_parameter("max_speed", 0.3);
-    declare_parameter("min_speed", 0.12);
-    declare_parameter("steering_gain", 1.0);
-    declare_parameter("bubble_radius", 0.40);
-    declare_parameter("free_threshold", 1.2);
-    declare_parameter("stop_distance", 0.25);
+    declare_parameter("max_speed", 0.3);       // [m/s]
+    declare_parameter("min_speed", 0.12);      // [m/s]
+    declare_parameter("steering_gain", 0.8);   // angular.z alaperosites
+    declare_parameter("bubble_radius", 0.30);  // robot fele szelessege + raghagyas [m]
+    declare_parameter("free_threshold", 0.6);  // ennel kozelebbi sugar nem szabad [m]
+    declare_parameter("stop_distance", 0.25);  // ennel kozelebb elore megall [m]
 
     cmd_pub_ = create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 1);
     scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
@@ -32,6 +34,14 @@ public:
       std::bind(&Megoldas::scanCallback, this, std::placeholders::_1));
 
     RCLCPP_INFO(get_logger(), "Az algoritmus elindult");
+  }
+
+  ~Megoldas() override
+  {
+    // leallitaskor nulla sebesseg, hogy a robot ne menjen tovabb
+    if (cmd_pub_) {
+      drive(0.0, 0.0);
+    }
   }
 
 private:
@@ -86,17 +96,23 @@ private:
       return;
     }
 
-    // 3. Buborek: a legkozelebbi pont koruli sugarakat blokkoltnak vesszuk
+    // 3. Buborek: csak az elso +/-60 fok legkozelebbi pontja korul blokkolunk
     std::vector<double> r(n);
     for (size_t k = 0; k < n; ++k) {
       r[k] = pts[k].second;
     }
-    const size_t ci = std::min_element(
-      pts.begin(), pts.end(),
-      [](const auto & a, const auto & b) {return a.second < b.second;}) - pts.begin();
-    const double closest = std::max(pts[ci].second, 0.05);
+    size_t ci = n / 2;
+    double closest = kMaxRange;
+    for (size_t k = 0; k < n; ++k) {
+      if (std::abs(pts[k].first) < kBubbleFov && pts[k].second < closest) {
+        closest = pts[k].second;
+        ci = k;
+      }
+    }
+    closest = std::max(closest, 0.05);
     if (closest < kMaxRange) {
-      const double half_angle = std::asin(std::min(1.0, param("bubble_radius") / closest));
+      const double half_angle = std::min(
+        kMaxBubbleAngle, std::asin(std::min(1.0, param("bubble_radius") / closest)));
       const long half_rays = static_cast<long>(std::ceil(half_angle / inc));
       const long lo = std::max<long>(0, static_cast<long>(ci) - half_rays);
       const long hi = std::min<long>(static_cast<long>(n) - 1, static_cast<long>(ci) + half_rays);
@@ -106,7 +122,7 @@ private:
     }
 
     // 4. Legjobb rés: az a szabad szakasz, ahol a tavolsagok osszege a legnagyobb
-    //    (szeles es melyseg is szamit)
+    //    (szelesseg es melyseg is szamit)
     const double free_th = param("free_threshold");
     double best_sum = 0.0;
     size_t best_s = 0, best_e = 0;
@@ -134,19 +150,36 @@ private:
     }
 
     // 5. Celszog = a rés kozepe (pozitiv = balra)
-    const double angle = 0.5 * (pts[best_s].first + pts[best_e].first);
+    double angle = 0.5 * (pts[best_s].first + pts[best_e].first);
 
-    // 6. Kormanyzas + sebesseg (kanyarban es akadaly kozeleben lassabb)
-    const double w = std::clamp(param("steering_gain") * angle, -1.5, 1.5);
+    // szures: csokkenti az egyenes menti cikazast
+    angle_f_ = 0.5 * angle_f_ + 0.5 * angle;
+    angle = angle_f_;
+
+    // holtsav egyenesben
+    if (std::abs(angle) < 0.05) {
+      angle = 0.0;
+    }
+
+    // 6. Kormanyzas (nemlinearis: kis szognel puha, nagynal eros) + sebesseg
+    const double w = std::clamp(
+      param("steering_gain") * angle * (1.0 + 1.5 * std::abs(angle)), -1.5, 1.5);
     const double turn_factor = 1.0 - std::min(1.0, std::abs(angle) / kFov);
     const double dist_factor = std::clamp(front / 1.0, 0.0, 1.0);  // 1 m-nel kezd lassulni
     const double v = param("min_speed") +
       (param("max_speed") - param("min_speed")) * std::min(turn_factor, dist_factor);
 
+    RCLCPP_INFO_THROTTLE(
+      get_logger(), *get_clock(), 500,
+      "angle=%.2f front=%.2f gap=%zu..%zu v=%.2f w=%.2f",
+      angle, front, best_s, best_e, v, w);
+
     drive(v, w);
   }
 
   static constexpr double deg15 = 15.0 * kPi / 180.0;
+
+  double angle_f_ = 0.0;  // szurt celszog
 
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_pub_;
