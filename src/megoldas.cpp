@@ -71,8 +71,10 @@ private:
         continue;
       }
       double r = msg->ranges[i];
-      if (!std::isfinite(r) || r < msg->range_min || r > msg->range_max) {
-        r = kMaxRange;  // ervenytelen / nincs visszaverodes = szabad
+      if (!std::isfinite(r) || r > msg->range_max) {
+        r = kMaxRange;         // nincs visszaverodes (inf) = szabad
+      } else if (r < msg->range_min) {
+        r = msg->range_min;    // tul kozeli / ervenytelen = FOGLALT (nem szabad!)
       }
       pts.emplace_back(a, std::min(r, kMaxRange));
     }
@@ -121,35 +123,50 @@ private:
       }
     }
 
-    // 4. Rés keresés: a LEGMELYEBB rés nyer (nem a legszélesebb).
-    //    Igy a kanyar nyilasa (r ~ 3 m) mar messzirol nyer a fal (r ~ 1.5 m) ellen.
+    // 3b. Min-szuro (+/-2 sugar): kiszuri az egyedi tavoli sugarakat (zaj, repedes a falon),
+    //     igy egy hamis "melyseg" nem csalja be a robotot
+    std::vector<double> rf(n);
+    for (size_t k = 0; k < n; ++k) {
+      const size_t a = k >= 2 ? k - 2 : 0;
+      const size_t b = std::min(n - 1, k + 2);
+      double m = r[k];
+      for (size_t j = a; j <= b; ++j) {
+        m = std::min(m, r[j]);
+      }
+      rf[k] = m;
+    }
+
+    // 4. Rés keresés: a legmélyebb rés nyer, de csak ha a robot belefér.
+    //    score = melyseg * (belefer-e) - kis büntetes a nagy szogert
     const double free_th = param("free_threshold");
-    const double min_width = 0.15;  // [rad] ennel keskenyebb rest nem veszunk figyelembe
+    const double bubble = param("bubble_radius");
     double best_score = -1e9;
     double angle = 0.0;
     bool found = false;
     for (size_t k = 0; k < n;) {
-      if (r[k] <= free_th) {
+      if (rf[k] <= free_th) {
         ++k;
         continue;
       }
       const size_t s = k;
-      double max_r = 0.0;
-      while (k < n && r[k] > free_th) {
-        max_r = std::max(max_r, r[k]);
+      size_t pk = k;
+      while (k < n && rf[k] > free_th) {
+        if (rf[k] > rf[pk]) {
+          pk = k;
+        }
         ++k;
       }
       const size_t e = k - 1;
-      if (pts[e].first - pts[s].first < min_width) {
-        continue;
-      }
-      // a rés legmélyebb (max 90%-a feletti) sugarainak közepe
-      size_t lo2 = s, hi2 = e;
-      while (r[lo2] < 0.9 * max_r) {++lo2;}
-      while (r[hi2] < 0.9 * max_r) {--hi2;}
+      const double max_r = rf[pk];
+      // a csucs koruli, ~max melysegu (>=90%) osszefuggo szakasz
+      size_t lo2 = pk, hi2 = pk;
+      while (lo2 > s && rf[lo2 - 1] >= 0.9 * max_r) {--lo2;}
+      while (hi2 < e && rf[hi2 + 1] >= 0.9 * max_r) {++hi2;}
       const double ang = 0.5 * (pts[lo2].first + pts[hi2].first);
-      // melyseg - kis büntetes a nagy szogert (egyenes folyosón az egyenes nyer)
-      const double score = max_r - 0.4 * std::abs(ang);
+      const double width = pts[hi2].first - pts[lo2].first;
+      const double need = 2.0 * std::asin(std::min(1.0, bubble / max_r));  // ennyi szog kell
+      const double fit = std::min(1.0, width / need);
+      const double score = max_r * fit - 0.4 * std::abs(ang);
       if (score > best_score) {
         best_score = score;
         angle = ang;
