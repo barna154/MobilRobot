@@ -19,12 +19,12 @@ class Megoldas : public rclcpp::Node
 public:
   Megoldas() : Node("megoldas")
   {
-    declare_parameter("max_speed", 0.4);       // [m/s]
-    declare_parameter("min_speed", 0.15);      // [m/s]
-    declare_parameter("steering_gain", 1.5);   // angular.z = gain * szog
-    declare_parameter("bubble_radius", 0.35);  // robot fele szelessege + ráhagyas [m]
-    declare_parameter("free_threshold", 0.8);  // ennel kozelebbi sugar nem szabad [m]
-    declare_parameter("stop_distance", 0.25);  // ennel kozelebb elore megall [m]
+    declare_parameter("max_speed", 0.3);
+    declare_parameter("min_speed", 0.12);
+    declare_parameter("steering_gain", 1.0);
+    declare_parameter("bubble_radius", 0.40);
+    declare_parameter("free_threshold", 1.2);
+    declare_parameter("stop_distance", 0.25);
 
     cmd_pub_ = create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 1);
     scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
