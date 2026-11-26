@@ -27,7 +27,7 @@ public:
     declare_parameter("bubble_radius", 0.4);   // robot fele szelessege + raghagyas [m]
     declare_parameter("free_threshold", 0.6);  // ennel kozelebbi sugar nem szabad [m]
     declare_parameter("stop_distance", 0.2);   // ennel kozelebb elore megall/hatrál [m]
-    declare_parameter("center_gain", 0.8);     // folyoson kozepre huzas erositese (0 = ki)
+    declare_parameter("center_gain", 1.8);     // folyoson kozepre huzas erositese (0 = ki)
     declare_parameter("reverse_speed", -0.12); // hatrálas sebessege elakadaskor (0 = ki) [m/s]
     declare_parameter("open_dist", 1.2);       // oldalt ennel messzebb nincs fal = nyilas [m]
     declare_parameter("turn_front", 2.0);      // ha elore ennel kozelebb van fal + oldalt nyilas -> befordul [m]
