@@ -24,7 +24,7 @@ public:
     declare_parameter("max_speed", 0.4);       // [m/s]
     declare_parameter("min_speed", 0.1);      // [m/s]
     declare_parameter("steering_gain", 1.5);   // angular.z alaperosites
-    declare_parameter("bubble_radius", 0.3);  // robot fele szelessege + raghagyas [m]
+    declare_parameter("bubble_radius", 0.4);  // robot fele szelessege + raghagyas [m]
     declare_parameter("free_threshold", 0.6);  // ennel kozelebbi sugar nem szabad [m]
     declare_parameter("stop_distance", 0.2);  // ennel kozelebb elore megall [m]
 
