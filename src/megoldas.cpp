@@ -22,11 +22,13 @@ public:
   Megoldas() : Node("megoldas")
   {
     declare_parameter("max_speed", 0.4);       // [m/s]
-    declare_parameter("min_speed", 0.1);      // [m/s]
-    declare_parameter("steering_gain", 1.5);   // angular.z alaperosites
-    declare_parameter("bubble_radius", 0.4);  // robot fele szelessege + raghagyas [m]
+    declare_parameter("min_speed", 0.1);       // [m/s]
+    declare_parameter("steering_gain", 1.5);   // a rés iranyaba kormanyzas erositese
+    declare_parameter("bubble_radius", 0.4);   // robot fele szelessege + raghagyas [m]
     declare_parameter("free_threshold", 0.6);  // ennel kozelebbi sugar nem szabad [m]
-    declare_parameter("stop_distance", 0.2);  // ennel kozelebb elore megall [m]
+    declare_parameter("stop_distance", 0.2);   // ennel kozelebb elore megall/hatrál [m]
+    declare_parameter("center_gain", 0.8);     // folyoson kozepre huzas erositese (0 = ki)
+    declare_parameter("reverse_speed", -0.12); // hatrálas sebessege elakadaskor (0 = ki) [m/s]
 
     cmd_pub_ = create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 1);
     scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
@@ -55,11 +57,54 @@ private:
     cmd_pub_->publish(cmd);
   }
 
+  // Elakadas: ha van hely hatul, hatral ~1.2 s-ig a nyitottabb oldal fele fordulva.
+  // Ha nem latunk hatrafele (rear_n == 0) vagy kicsi a hely, csak megall.
+  void tryRecover(
+    const std::vector<std::pair<double, double>> & pts, double rear, size_t rear_n)
+  {
+    if (param("reverse_speed") >= 0.0 || rear_n == 0 || rear < 0.3) {
+      drive(0.0, 0.0);
+      return;
+    }
+    double sum_l = 0.0, sum_r = 0.0;
+    for (const auto & p : pts) {
+      (p.first > 0.0 ? sum_l : sum_r) += p.second;
+    }
+    recover_dir_ = (sum_l >= sum_r) ? 1.0 : -1.0;  // az orr a nyitottabb oldal fele forduljon
+    recovering_ = true;
+    recover_until_ = now() + rclcpp::Duration::from_seconds(1.2);
+    drive(param("reverse_speed"), recover_dir_);
+  }
+
   void scanCallback(const sensor_msgs::msg::LaserScan::SharedPtr msg)
   {
     const double inc = std::abs(msg->angle_increment);
     if (msg->ranges.empty() || inc <= 0.0) {
       return;
+    }
+
+    // Hatso szabad hely a nyers merésbol (|szog| > ~143 fok)
+    double rear = kMaxRange;
+    size_t rear_n = 0;
+    for (size_t i = 0; i < msg->ranges.size(); ++i) {
+      const double a =
+        std::remainder(msg->angle_min + i * msg->angle_increment, 2.0 * kPi);
+      if (std::abs(a) > 2.5) {
+        ++rear_n;
+        const double rr = msg->ranges[i];
+        if (std::isfinite(rr) && rr >= msg->range_min) {
+          rear = std::min(rear, rr);
+        }
+      }
+    }
+
+    // Folyamatban levo hatralas
+    if (recovering_) {
+      if (now() < recover_until_ && rear > 0.3 && rear_n > 0 && param("reverse_speed") < 0.0) {
+        drive(param("reverse_speed"), recover_dir_);
+        return;
+      }
+      recovering_ = false;
     }
 
     // 1. Sugarak (szog, tavolsag), csak az elso +/-kFov, szog szerint rendezve
@@ -85,6 +130,16 @@ private:
     std::sort(pts.begin(), pts.end());
     const size_t n = pts.size();
 
+    // Oldalso tavolsag (kb. 70-100 fok): a falak merolegesen mert tavolsaga, max 1 m
+    double lat_l = 1.0, lat_r = 1.0;
+    for (const auto & p : pts) {
+      const double aa = std::abs(p.first);
+      if (aa >= 1.2 && aa <= 1.8) {
+        const double d = p.second * std::sin(aa);
+        (p.first > 0.0 ? lat_l : lat_r) = std::min(p.first > 0.0 ? lat_l : lat_r, d);
+      }
+    }
+
     // 2. Biztonsag: tavolsag elore (+/-15 fok)
     double front = kMaxRange;
     for (const auto & p : pts) {
@@ -94,7 +149,7 @@ private:
     }
     if (front < param("stop_distance")) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "STOP: akadaly elore");
-      drive(0.0, 0.0);
+      tryRecover(pts, rear, rear_n);
       return;
     }
 
@@ -123,12 +178,12 @@ private:
       }
     }
 
-    // 3b. Min-szuro (+/-2 sugar): kiszuri az egyedi tavoli sugarakat (zaj, repedes a falon),
+    // 3b. Min-szuro (+/-1 sugar): kiszuri az egyedi tavoli sugarakat (zaj, repedes a falon),
     //     igy egy hamis "melyseg" nem csalja be a robotot
     std::vector<double> rf(n);
     for (size_t k = 0; k < n; ++k) {
-      const size_t a = k >= 2 ? k - 2 : 0;
-      const size_t b = std::min(n - 1, k + 2);
+      const size_t a = k >= 1 ? k - 1 : 0;
+      const size_t b = std::min(n - 1, k + 1);
       double m = r[k];
       for (size_t j = a; j <= b; ++j) {
         m = std::min(m, r[j]);
@@ -164,7 +219,7 @@ private:
       while (hi2 < e && rf[hi2 + 1] >= 0.9 * max_r) {++hi2;}
       const double ang = 0.5 * (pts[lo2].first + pts[hi2].first);
       const double width = pts[hi2].first - pts[lo2].first;
-      const double need = 2.0 * std::asin(std::min(1.0, bubble / max_r));  // ennyi szog kell
+      const double need = 2.0 * std::asin(std::min(1.0, 0.5 * bubble / max_r));  // ennyi szog kell
       const double fit = std::min(1.0, width / need);
       const double score = max_r * fit - 0.4 * std::abs(ang);
       if (score > best_score) {
@@ -175,7 +230,7 @@ private:
     }
     if (!found) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "STOP: nincs szabad rés");
-      drive(0.0, 0.0);
+      tryRecover(pts, rear, rear_n);
       return;
     }
 
@@ -190,8 +245,11 @@ private:
     }
 
     // 6. Kormanyzas (nemlinearis: kis szognel puha, nagynal eros) + sebesseg
-    const double w = std::clamp(
-      param("steering_gain") * angle * (1.0 + 1.5 * std::abs(angle)), -1.5, 1.5);
+    const double w_gap = param("steering_gain") * angle * (1.0 + 1.5 * std::abs(angle));
+    // kozepre huzas: ha az egyik fal kozelebb van, forduljon el tole (kanyarban kikapcsol)
+    const double center_w =
+      param("center_gain") * (lat_l - lat_r) * (1.0 - std::min(1.0, std::abs(angle) / 0.5));
+    const double w = std::clamp(w_gap + center_w, -1.5, 1.5);
     const double turn_factor = 1.0 - std::min(1.0, std::abs(angle) / kFov);
     const double dist_factor = std::clamp(front / 1.5, 0.0, 1.0);  // 1.5 m-nel kezd lassulni
     const double v = param("min_speed") +
@@ -199,8 +257,8 @@ private:
 
     RCLCPP_INFO_THROTTLE(
       get_logger(), *get_clock(), 500,
-      "angle=%.2f front=%.2f score=%.2f v=%.2f w=%.2f",
-      angle, front, best_score, v, w);
+      "angle=%.2f front=%.2f score=%.2f latL=%.2f latR=%.2f v=%.2f w=%.2f",
+      angle, front, best_score, lat_l, lat_r, v, w);
 
     drive(v, w);
   }
@@ -208,6 +266,9 @@ private:
   static constexpr double deg15 = 15.0 * kPi / 180.0;
 
   double angle_f_ = 0.0;  // szurt celszog
+  bool recovering_ = false;
+  double recover_dir_ = 1.0;
+  rclcpp::Time recover_until_{0, 0, RCL_ROS_TIME};
 
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_pub_;
